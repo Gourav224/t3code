@@ -4357,12 +4357,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       yield* refuseOptionLikeRefName("GitVcsDriver.switchRef", input.cwd, checkoutArgs.at(-1));
 
       // A stale ref must not turn into a path checkout that discards local edits.
+      // No timeout: a checkout of thousands of files can outlast any fixed limit, and git
+      // cannot roll back one that is killed after writing part of the tree but before
+      // updating the index and HEAD, which leaves the old branch checked out over the new
+      // branch's files.
       yield* executeGitWithStableDiagnostics(
         "GitVcsDriver.switchRef.checkout",
         input.cwd,
         [...checkoutArgs, "--"],
         {
-          timeoutMs: 10_000,
+          timeoutMs: null,
           fallbackErrorDetail: "git checkout failed",
         },
       );

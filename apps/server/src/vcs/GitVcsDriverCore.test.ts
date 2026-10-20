@@ -151,6 +151,40 @@ const initRepoWithCommit = (
     return { initialBranch };
   });
 
+it.effect("lets a slow branch checkout finish instead of killing it partway", () =>
+  Effect.gen(function* () {
+    const checkoutGate = yield* Deferred.make<void>();
+    const checkoutStarted = yield* Deferred.make<void>();
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        if (!ChildProcess.isStandardCommand(command) || command.args[0] !== "checkout") {
+          return makeSuccessfulHandle("feature");
+        }
+        yield* Deferred.succeed(checkoutStarted, undefined);
+        return ChildProcessSpawner.makeHandle({
+          ...makeSuccessfulHandle(""),
+          exitCode: Deferred.await(checkoutGate).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+        });
+      }),
+    );
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+
+    const switching = yield* driver
+      .switchRef({ cwd: "/repo", refName: "feature" })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(checkoutStarted);
+    // A checkout rewriting thousands of files can outlast any fixed limit, and git
+    // cannot roll back one that is killed after it has written part of the tree.
+    yield* TestClock.adjust("1 hour");
+    assert.isUndefined(switching.pollUnsafe(), "the checkout is still running");
+
+    yield* Deferred.succeed(checkoutGate, undefined);
+    assert.deepEqual(yield* Fiber.join(switching), { refName: "feature" });
+  }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
 it.effect.each(["root", "nested", "worktree"] as const)(
   "skips clean filters while the %s index is locked and resumes after unlock",
   (location) =>
