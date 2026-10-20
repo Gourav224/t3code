@@ -157,9 +157,11 @@ const makeSlowCheckout = Effect.gen(function* () {
   const gate = yield* Deferred.make<void>();
   const started = yield* Deferred.make<void>();
   const released = yield* Deferred.make<void>();
+  const spawned: Array<string> = [];
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.acquireRelease(
       Effect.gen(function* () {
+        if (ChildProcess.isStandardCommand(command)) spawned.push(command.args.join(" "));
         if (!ChildProcess.isStandardCommand(command) || command.args[0] !== "checkout") {
           return makeSuccessfulHandle("feature");
         }
@@ -178,7 +180,7 @@ const makeSlowCheckout = Effect.gen(function* () {
   const driver = yield* makeGitVcsDriverCore().pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
   );
-  return { driver, started, released, finish: Deferred.succeed(gate, undefined) };
+  return { driver, started, released, spawned, finish: Deferred.succeed(gate, undefined) };
 });
 
 // A checkout rewriting thousands of files can outlast any fixed limit, and git cannot roll back
@@ -201,7 +203,7 @@ it.effect("lets a slow branch checkout finish instead of killing it partway", ()
 
 it.effect("keeps a branch checkout running when the request that started it is interrupted", () =>
   Effect.gen(function* () {
-    const { driver, started, released, finish } = yield* makeSlowCheckout;
+    const { driver, started, released, spawned, finish } = yield* makeSlowCheckout;
 
     const switching = yield* driver
       .switchRef({ cwd: "/repo", refName: "feature" })
@@ -210,8 +212,14 @@ it.effect("keeps a branch checkout running when the request that started it is i
     yield* Fiber.interrupt(switching);
     assert.isFalse(yield* Deferred.isDone(released), "git was killed with its caller");
 
+    // The caller's own cache invalidation ran when it was interrupted, before git finished
+    // rewriting the tree, so a read since could have cached the old branch.
+    yield* TestClock.adjust("0 seconds");
+    const spawnedBeforeFinish = spawned.length;
     yield* finish;
     yield* Deferred.await(released);
+    yield* TestClock.adjust("0 seconds");
+    assert.isAbove(spawned.length, spawnedBeforeFinish, "caches were not cleared after git exited");
   }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 

@@ -4361,15 +4361,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // updating the index and HEAD, which leaves the old branch checked out over the new
       // branch's files. So nothing may end it early: no timeout, no output cap (the output
       // is never read), and a cancelled request stops waiting without killing git.
-      const checkout = yield* executeGitWithStableDiagnostics(
-        "GitVcsDriver.switchRef.checkout",
+      // The caller's own invalidation can run before git exits, so the forked checkout clears
+      // the ref caches itself once it ends.
+      const checkout = yield* withListRefsInvalidation(
         input.cwd,
-        [...checkoutArgs, "--"],
-        {
-          timeoutMs: null,
-          appendTruncationMarker: true,
-          fallbackErrorDetail: "git checkout failed",
-        },
+        executeGitWithStableDiagnostics(
+          "GitVcsDriver.switchRef.checkout",
+          input.cwd,
+          [...checkoutArgs, "--"],
+          {
+            timeoutMs: null,
+            appendTruncationMarker: true,
+            fallbackErrorDetail: "git checkout failed",
+          },
+        ),
       ).pipe(Effect.forkIn(serviceScope));
       yield* Fiber.join(checkout);
 
