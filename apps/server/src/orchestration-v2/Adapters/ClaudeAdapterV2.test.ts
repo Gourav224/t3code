@@ -1776,6 +1776,21 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
       assert.notInclude(spawned, "dummy-mcp-credential");
     }),
   );
+
+  it.effect("closes the CLI when it never answers the MCP registration", () =>
+    Effect.gen(function* () {
+      const cli = makeFakeClaudeCli(false);
+      const opening = yield* openWith(cli).pipe(Effect.result, Effect.forkChild);
+      yield* TestClock.adjust("90 seconds");
+      const opened = yield* Fiber.join(opening);
+
+      assert.equal(opened._tag, "Failure");
+      if (opened._tag === "Failure") {
+        assert.instanceOf(opened.failure, ClaudeAdapterV2.ClaudeMcpRegistrationTimeoutError);
+      }
+      assert.isTrue(cli.closed());
+    }),
+  );
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
