@@ -187,6 +187,35 @@ describe("parseCodexLine", () => {
     }
   });
 
+  it("counts the first request of a new cumulative-counter sequence once and keeps validating after it", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const first = counters(1000, 200);
+    const restarted = counters(100, 20);
+    expect(parseCodexLine(counted(first, first), state)?.totals.outputTokens).toBe(200);
+    // The counters start over: the cumulative snapshot equals the request and is lower than before.
+    expect(parseCodexLine(counted(restarted, restarted), state)?.totals).toMatchObject({
+      uncachedInputTokens: 100,
+      outputTokens: 20,
+    });
+    expect(parseCodexLine(counted(restarted, counters(200, 40)), state)?.totals.outputTokens).toBe(
+      20,
+    );
+    // The new baseline is trusted from here on, so a bad delta is still rejected.
+    expect(parseCodexLine(counted(restarted, counters(250, 50)), state)).toBeNull();
+    expect(codexUsageFormat.readMalformedRecords?.(state)).toBe(1);
+  });
+
+  it("still rejects counters that fall without matching their request", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const first = counters(1000, 200);
+    parseCodexLine(counted(first, first), state);
+    expect(parseCodexLine(counted(counters(100, 20), counters(90, 20)), state)).toBeNull();
+    expect(parseCodexLine(counted(counters(100, 20), counters(100, 30)), state)).toBeNull();
+    expect(codexUsageFormat.readMalformedRecords?.(state)).toBe(2);
+  });
+
   it.each(["request", "cumulative"])("skips malformed %s counters and recovers", (malformed) => {
     const state = initialCodexScanState();
     parseCodexLine(turnContext, state);
