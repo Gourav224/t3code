@@ -12,11 +12,12 @@ function Document(props: {
   readonly path: string;
   readonly contentHeight?: number;
   readonly viewportHeight?: number;
+  readonly hideScrollbars?: boolean;
 }) {
   const ref = useRememberedScroll(props.path);
   return (
     <div style={{ height: props.viewportHeight ?? 200 }}>
-      <ScrollArea>
+      <ScrollArea hideScrollbars={props.hideScrollbars ?? false}>
         <div ref={ref} style={{ height: props.contentHeight ?? 2000 }} />
       </ScrollArea>
     </div>
@@ -38,17 +39,17 @@ it("returns a remounted document to where it was scrolled, per path", async () =
   const viewport = () =>
     container.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]')!;
 
-  await show("a.md");
+  await show("order-a.md");
   viewport().scrollTop = 640;
-  await show("b.md");
+  await show("order-b.md");
   expect(viewport().scrollTop).toBe(0);
   viewport().scrollTop = 120;
 
   await show(null);
-  await show("a.md");
+  await show("order-a.md");
   expect(viewport().scrollTop).toBe(640);
 
-  await show("b.md");
+  await show("order-b.md");
   expect(viewport().scrollTop).toBe(120);
 });
 
@@ -66,7 +67,7 @@ it("keeps restoring while late content is still making the document taller", asy
     act(async () =>
       root.render(
         contentHeight === null ? null : (
-          <Document key="a.md" path="a.md" contentHeight={contentHeight} />
+          <Document key="late-content.md" path="late-content.md" contentHeight={contentHeight} />
         ),
       ),
     );
@@ -121,45 +122,54 @@ function mountDocument() {
 it("stops restoring once the user drags the scrollbar", async () => {
   const { container, show, viewport, nextFrame } = mountDocument();
 
-  await show({ path: "a.md", contentHeight: 2000 });
+  await show({ path: "scrollbar.md", contentHeight: 2000 });
   viewport().scrollTop = 640;
   await show(null);
 
-  await show({ path: "a.md", contentHeight: 300 });
+  await show({ path: "scrollbar.md", contentHeight: 300 });
   // The scrollbar is a sibling of the viewport, so only the scroll area as a whole sees it.
   await userEvent.click(
     container.querySelector<HTMLElement>('[data-slot="scroll-area-scrollbar"]')!,
   );
   const chosen = viewport().scrollTop;
-  await show({ path: "a.md", contentHeight: 2000 });
+  await show({ path: "scrollbar.md", contentHeight: 2000 });
   await nextFrame();
   expect(viewport().scrollTop).toBe(chosen);
 });
 
 it("restores once the viewport alone becomes tall enough to reach the saved position", async () => {
   const { show, viewport, nextFrame } = mountDocument();
+  // Hidden scrollbars take no width, so nothing but the viewport's own height changes.
+  const doc = { path: "viewport-only.md", hideScrollbars: true } as const;
 
-  await show({ path: "a.md", contentHeight: 2000 });
+  await show({ ...doc, contentHeight: 2000 });
   viewport().scrollTop = 640;
   await show(null);
 
-  // The content never changes size: at 700px tall in a 200px viewport it can only scroll to 500.
-  await show({ path: "a.md", contentHeight: 700, viewportHeight: 200 });
+  // At 700px tall in a 200px viewport it can only scroll to 500. An observer reports its
+  // initial size a frame after it starts, so let that pass: only a later resize may retry.
+  await show({ ...doc, contentHeight: 700, viewportHeight: 200 });
+  await nextFrame();
   expect(viewport().scrollTop).toBe(500);
-  await show({ path: "a.md", contentHeight: 700, viewportHeight: 50 });
+  await show({ ...doc, contentHeight: 700, viewportHeight: 50 });
   await nextFrame();
   expect(viewport().scrollTop).toBe(640);
 });
 
 it("keeps the saved position when the surface unmounts while its panel is hidden", async () => {
   const { container, show, viewport } = mountDocument();
+  const doc = { path: "hidden-panel.md", contentHeight: 2000 };
 
-  await show({ path: "a.md", contentHeight: 2000 });
+  await show(doc);
   viewport().scrollTop = 640;
+  await show(null);
+
+  await show(doc);
+  expect(viewport().scrollTop).toBe(640);
   container.style.display = "none";
   await show(null);
   container.style.display = "";
 
-  await show({ path: "a.md", contentHeight: 2000 });
+  await show(doc);
   expect(viewport().scrollTop).toBe(640);
 });

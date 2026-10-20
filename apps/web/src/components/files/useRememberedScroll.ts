@@ -53,7 +53,14 @@ export function useRememberedScroll(key: string) {
     if (saved !== undefined) {
       restore();
       if (restoring) {
-        stopObserving = observeResize(content, restore);
+        // The viewport shrinking raises the furthest position the document can scroll to, with
+        // the content's own size unchanged.
+        const stopContent = observeResize(content, restore);
+        const stopViewport = observeResize(viewport, restore);
+        stopObserving = () => {
+          stopContent();
+          stopViewport();
+        };
         for (const type of USER_SCROLL_EVENTS) {
           scrollArea.addEventListener(type, stop, {
             passive: true,
