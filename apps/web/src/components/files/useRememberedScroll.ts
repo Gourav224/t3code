@@ -14,14 +14,15 @@ function remember(key: string, scrollTop: number) {
 }
 
 /**
- * Gives a scrolled surface back its position after it remounts, as the code
- * view does. Attach the returned ref to an element inside the `ScrollArea`.
+ * Gives a scrolled surface back its position after it remounts. Attach the
+ * returned ref to an element inside the `ScrollArea`.
  *
  * Images and other late content can leave the document too short to reach the
  * saved position when it mounts, so the restore repeats as the content resizes
  * until it lands or the user scrolls. The position is read when the surface
- * unmounts rather than from scroll events, and an unfinished restore keeps the
- * remembered position, because the viewport is still clamped short of it.
+ * unmounts rather than from scroll events. An unfinished restore keeps the
+ * remembered position, because the viewport is still clamped short of it, and
+ * so does an unmount while the panel is hidden, which reads as zero.
  */
 export function useRememberedScroll(key: string) {
   const ref = useRef<HTMLDivElement>(null);
@@ -29,7 +30,9 @@ export function useRememberedScroll(key: string) {
   useLayoutEffect(() => {
     const content = ref.current;
     const viewport = content?.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
-    if (!content || !viewport) return;
+    // The scrollbar is a sibling of the viewport, so dragging it is only seen from the root.
+    const scrollArea = viewport?.parentElement;
+    if (!content || !viewport || !scrollArea) return;
 
     const saved = scrollTops.get(key);
     const takeover = new AbortController();
@@ -43,7 +46,8 @@ export function useRememberedScroll(key: string) {
     const restore = () => {
       if (saved === undefined) return;
       viewport.scrollTop = saved;
-      if (viewport.scrollTop >= saved) stop();
+      // Fractional zoom levels can read a pixel short of the value just set.
+      if (viewport.scrollTop >= saved - 1) stop();
     };
 
     if (saved !== undefined) {
@@ -51,13 +55,17 @@ export function useRememberedScroll(key: string) {
       if (restoring) {
         stopObserving = observeResize(content, restore);
         for (const type of USER_SCROLL_EVENTS) {
-          viewport.addEventListener(type, stop, { passive: true, signal: takeover.signal });
+          scrollArea.addEventListener(type, stop, {
+            passive: true,
+            capture: true,
+            signal: takeover.signal,
+          });
         }
       }
     }
 
     return () => {
-      if (!restoring) remember(key, viewport.scrollTop);
+      if (!restoring && viewport.clientHeight > 0) remember(key, viewport.scrollTop);
       stop();
     };
   }, [key]);
