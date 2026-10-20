@@ -151,37 +151,67 @@ const initRepoWithCommit = (
     return { initialBranch };
   });
 
-it.effect("lets a slow branch checkout finish instead of killing it partway", () =>
-  Effect.gen(function* () {
-    const checkoutGate = yield* Deferred.make<void>();
-    const checkoutStarted = yield* Deferred.make<void>();
-    const spawner = ChildProcessSpawner.make((command) =>
+// A `git checkout` that stays running until its gate opens, and reports when git's process
+// scope is closed, which is what kills it.
+const makeSlowCheckout = Effect.gen(function* () {
+  const gate = yield* Deferred.make<void>();
+  const started = yield* Deferred.make<void>();
+  const released = yield* Deferred.make<void>();
+  const spawner = ChildProcessSpawner.make((command) =>
+    Effect.acquireRelease(
       Effect.gen(function* () {
         if (!ChildProcess.isStandardCommand(command) || command.args[0] !== "checkout") {
           return makeSuccessfulHandle("feature");
         }
-        yield* Deferred.succeed(checkoutStarted, undefined);
+        yield* Deferred.succeed(started, undefined);
         return ChildProcessSpawner.makeHandle({
           ...makeSuccessfulHandle(""),
-          exitCode: Deferred.await(checkoutGate).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+          exitCode: Deferred.await(gate).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
         });
       }),
-    );
-    const driver = yield* makeGitVcsDriverCore().pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    );
+      () =>
+        ChildProcess.isStandardCommand(command) && command.args[0] === "checkout"
+          ? Deferred.succeed(released, undefined)
+          : Effect.void,
+    ),
+  );
+  const driver = yield* makeGitVcsDriverCore().pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+  );
+  return { driver, started, released, finish: Deferred.succeed(gate, undefined) };
+});
+
+// A checkout rewriting thousands of files can outlast any fixed limit, and git cannot roll back
+// one that is killed after it has written part of the tree.
+it.effect("lets a slow branch checkout finish instead of killing it partway", () =>
+  Effect.gen(function* () {
+    const { driver, started, finish } = yield* makeSlowCheckout;
 
     const switching = yield* driver
       .switchRef({ cwd: "/repo", refName: "feature" })
       .pipe(Effect.forkChild);
-    yield* Deferred.await(checkoutStarted);
-    // A checkout rewriting thousands of files can outlast any fixed limit, and git
-    // cannot roll back one that is killed after it has written part of the tree.
+    yield* Deferred.await(started);
     yield* TestClock.adjust("1 hour");
     assert.isUndefined(switching.pollUnsafe(), "the checkout is still running");
 
-    yield* Deferred.succeed(checkoutGate, undefined);
+    yield* finish;
     assert.deepEqual(yield* Fiber.join(switching), { refName: "feature" });
+  }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("keeps a branch checkout running when the request that started it is interrupted", () =>
+  Effect.gen(function* () {
+    const { driver, started, released, finish } = yield* makeSlowCheckout;
+
+    const switching = yield* driver
+      .switchRef({ cwd: "/repo", refName: "feature" })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(started);
+    yield* Fiber.interrupt(switching);
+    assert.isFalse(yield* Deferred.isDone(released), "git was killed with its caller");
+
+    yield* finish;
+    yield* Deferred.await(released);
   }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
