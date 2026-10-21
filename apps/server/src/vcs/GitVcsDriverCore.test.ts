@@ -214,13 +214,18 @@ it.effect("keeps a branch checkout running when the request that started it is i
     assert.isFalse(yield* Deferred.isDone(released), "git was killed with its caller");
 
     // The caller's own cache invalidation ran when it was interrupted, before git finished
-    // rewriting the tree, so a read since could have cached the old branch.
+    // rewriting the tree, so a read since could have cached the old branch. The cleanup that
+    // follows git's exit has to look the repository up again, which is the Git command counted.
     yield* TestClock.adjust("0 seconds");
     const spawnedBeforeFinish = spawned.length;
     yield* finish;
     yield* Deferred.await(released);
     yield* TestClock.adjust("0 seconds");
-    assert.isAbove(spawned.length, spawnedBeforeFinish, "caches were not cleared after git exited");
+    assert.isAbove(
+      spawned.length,
+      spawnedBeforeFinish,
+      "cache cleanup did not run after git exited",
+    );
   }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
