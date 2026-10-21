@@ -151,7 +151,7 @@ const FORGE_SSH_WEB_HOSTS: Readonly<Record<string, string>> = {
   "altssh.gitlab.com": "gitlab.com",
 };
 
-const webHost = (host: string): string => FORGE_SSH_WEB_HOSTS[host] ?? host;
+export const webHost = (host: string): string => FORGE_SSH_WEB_HOSTS[host] ?? host;
 
 export function normalizeGitRemoteUrl(value: string): string {
   const normalized = value
