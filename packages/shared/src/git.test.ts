@@ -74,6 +74,7 @@ describe("normalizeGitRemoteUrl", () => {
       "gitlab.com/group/sub/repo",
     );
     expect(normalizeGitRemoteUrl("https://github.com/Owner/Repo")).toBe("github.com/owner/repo");
+    expect(normalizeGitRemoteUrl("git@constructor:Owner/Repo.git")).toBe("constructor/owner/repo");
   });
 
   it("gives an Azure DevOps repository the same key over SSH as over HTTPS", () => {
