@@ -53,7 +53,7 @@ function isCursorStallAbort(reason: unknown): boolean {
     reason instanceof Error &&
     reason.name === "AbortError" &&
     typeof reason.stack === "string" &&
-    /\bonStall\b/.test(reason.stack)
+    /^\s+at (?:\S+\.)?onStall\b/m.test(reason.stack)
   );
 }
 

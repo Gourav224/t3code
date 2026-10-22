@@ -53,6 +53,14 @@ describe("CursorSdk unhandled rejection guard", () => {
     }),
   );
 
+  it.effect("still exits on an abort whose message merely mentions onStall", () =>
+    Effect.gen(function* () {
+      const abort = new DOMException("onStall was aborted", "AbortError");
+      abort.stack = "AbortError: onStall was aborted\n    at somewhereElse (app.js:1:1)";
+      assert.deepStrictEqual(yield* rejectThroughGuard(abort), [[1]]);
+    }),
+  );
+
   it.effect("still exits on other rejections", () =>
     Effect.gen(function* () {
       assert.deepStrictEqual(yield* rejectThroughGuard(new Error("WritableIterable is closed")), [
