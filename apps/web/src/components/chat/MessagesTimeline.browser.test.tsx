@@ -1,4 +1,7 @@
-import { EnvironmentId, MessageId, RunId, ScheduledTaskId } from "@t3tools/contracts";
+import { AudioPreview } from "../files/AudioPreview";
+import { onTestFinished } from "vite-plus/test";
+import { stubGlobal } from "../../../test/render";
+import { EnvironmentId, MessageId, RunId, ScheduledTaskId, ThreadId } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, Profiler, type ComponentProps, type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -7,6 +10,8 @@ import "~/index.css";
 
 import { act, render } from "../../../test/render";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { makeStreamingTimelineFixture } from "../../test-fixtures";
+import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 import { remarkThoughtPreview } from "./TimelineWorkEntryRow.logic";
 import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
 import { collectThreadFindRanges } from "./threadFindHighlights";
@@ -27,6 +32,18 @@ vi.mock(import("~/state/query"), async (original) => ({
     refresh: () => {},
   })) as never,
 }));
+
+const audioAsset = vi.hoisted(() => ({ url: "" }));
+vi.mock(import("~/assets/assetUrls"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    useAssetUrlState: ((...args: Parameters<typeof actual.useAssetUrlState>) =>
+      audioAsset.url
+        ? { _tag: "Success", url: audioAsset.url }
+        : actual.useAssetUrlState(...args)) as typeof actual.useAssetUrlState,
+  };
+});
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const CREATED_AT = "2026-03-17T19:12:28.000Z";
@@ -310,6 +327,206 @@ describe("MessagesTimeline automation prompts", () => {
   });
 });
 
+const SENDER_THREAD_ID = ThreadId.make("thread-sender");
+const AGENT_MESSAGE = "Review finished\n\nThe migration drops the index before backfilling it.";
+
+describe("MessagesTimeline agent messages", () => {
+  it("folds a message from another agent into a one-line preview", async () => {
+    setup();
+    const onOpenThread = vi.fn();
+    await using screen = await renderTimeline(
+      [message(AGENT_MESSAGE, { createdBy: "agent", senderThreadId: SENDER_THREAD_ID })],
+      { onOpenThread },
+    );
+    const row = screen.button(/^Agent/);
+    expect(row.textContent).toContain("Review finished");
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.text()).not.toContain("drops the index");
+    expect(screen.buttons("Open thread")).toHaveLength(0);
+
+    await click(row);
+    expect(screen.text()).toContain("The migration drops the index before backfilling it.");
+    await click(screen.button("Open thread"));
+    expect(onOpenThread).toHaveBeenCalledWith(SENDER_THREAD_ID);
+
+    await click(screen.button(/^Agent/));
+    expect(screen.text()).not.toContain("drops the index");
+  });
+
+  it("leaves messages sent by T3 Code as full bubbles", async () => {
+    setup();
+    await using screen = await renderTimeline([
+      message(AGENT_MESSAGE, { createdBy: "agent", creationSource: "server" }),
+    ]);
+    expect(screen.buttons(/^Agent/)).toHaveLength(0);
+    expect(screen.text()).toContain("drops the index");
+  });
+
+  it("reveals a find match inside a folded agent message", async () => {
+    setup();
+    const text = `${"Checked the next file.\n\n".repeat(16)}The migration drops the index.`;
+    await using screen = await renderTimeline(
+      [message(text, { createdBy: "agent", senderThreadId: SENDER_THREAD_ID })],
+      {
+        findExpanded: true,
+        findQuery: "drops the index",
+        activeFindMatch: { entryId: "entry-message-1", runId: null, occurrence: 0 },
+      },
+    );
+    await vi.waitFor(() =>
+      expect(screen.button(/^Agent/).getAttribute("aria-expanded")).toBe("true"),
+    );
+    const { range } = collectThreadFindRanges(screen.container, "drops the index")[0]!;
+    const body = screen.container.querySelector("[data-user-message-body]")!;
+    expect(range.getBoundingClientRect().height).toBeGreaterThan(0);
+    expect(range.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      body.getBoundingClientRect().bottom,
+    );
+  });
+});
+
+describe("MessagesTimeline attachments", () => {
+  it.each(["loadedmetadata", "loadeddata", "canplay"])(
+    "plays audio with unknown duration after %s and updates the total later",
+    async (readyEvent) => {
+      const onOpen = vi.fn();
+      const preview = (failed = false) => (
+        <AudioPreview
+          compact
+          src="data:audio/webm;base64,"
+          name="recording.webm"
+          failed={failed}
+          onOpen={onOpen}
+        />
+      );
+      await using screen = await renderElement(preview());
+      const audio = screen.container.querySelector("audio")!;
+      const duration = vi.spyOn(audio, "duration", "get").mockReturnValue(Infinity);
+      const play = vi.spyOn(audio, "play").mockResolvedValue();
+      expect(screen.button("Loading recording.webm")).toHaveProperty("disabled", true);
+      await act(() => audio.dispatchEvent(new Event(readyEvent)));
+      expect(screen.button("Play recording.webm")).toHaveProperty("disabled", false);
+      expect(screen.text()).toContain("0:00");
+      expect(screen.text()).not.toContain("/");
+      await click(screen.button("Play recording.webm"));
+      expect(play).toHaveBeenCalledOnce();
+      await act(() => {
+        vi.spyOn(audio, "currentTime", "get").mockReturnValue(3);
+        audio.dispatchEvent(new Event("play"));
+        audio.dispatchEvent(new Event("timeupdate"));
+      });
+      expect(screen.button("Pause recording.webm")).toHaveProperty("disabled", false);
+      expect(screen.text()).toContain("0:03");
+      const progress = screen.container.querySelector<HTMLElement>("span[aria-hidden]")!;
+      expect(progress.style.width).toBe("0%");
+      await act(() => {
+        duration.mockReturnValue(10);
+        audio.dispatchEvent(new Event("durationchange"));
+      });
+      expect(screen.text()).toContain("0:03 / 0:10");
+      expect(progress.style.width).toBe("30%");
+      await act(() => {
+        duration.mockReturnValue(NaN);
+        audio.dispatchEvent(new Event("durationchange"));
+      });
+      expect(screen.text()).not.toContain("/");
+      expect(progress.style.width).toBe("0%");
+      expect(screen.button("Pause recording.webm")).toHaveProperty("disabled", false);
+      await screen.rerender(preview(true));
+      expect(screen.text()).toContain("Unavailable");
+      await click(screen.button("Audio unavailable. Open recording.webm"));
+      expect(onOpen).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["pause", "error"])("unpins audio after %s", async (event) => {
+    const NativeObserver = IntersectionObserver;
+    using _observer = stubGlobal(
+      "IntersectionObserver",
+      class extends NativeObserver {
+        constructor(
+          private readonly notify: IntersectionObserverCallback,
+          options?: IntersectionObserverInit,
+        ) {
+          super(notify, options);
+        }
+        override observe(target: Element) {
+          this.notify([{ target, isIntersecting: true } as IntersectionObserverEntry], this);
+        }
+      },
+    );
+    const src =
+      "data:audio/wav;base64,UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA";
+    audioAsset.url = src;
+    onTestFinished(() => {
+      audioAsset.url = "";
+    });
+    const props = baseProps();
+    await using screen = await renderTimeline(
+      [
+        message(
+          "Two recordings.",
+          {
+            attachments: ["one", "two"].map((name) => ({
+              type: "file",
+              id: `attachment-${name}`,
+              name: `${name}.wav`,
+              mimeType: "audio/wav",
+              sizeBytes: 45,
+              previewUrl: src,
+            })),
+          },
+          "audio",
+        ),
+        ...Array.from({ length: 40 }, (_, index) =>
+          message("Conversation history. ".repeat(40), { role: "user" }, `history-${index}`),
+        ),
+      ],
+      props,
+    );
+    screen.container.style.height = "600px";
+    screen.container.scrollIntoView({ block: "start" });
+    await vi.waitFor(
+      async () => {
+        await act(() => {
+          void props.listRef.current?.scrollToIndex({ index: 0, animated: false });
+        });
+        expect(screen.container.querySelectorAll("audio")).toHaveLength(2);
+      },
+      { timeout: 5000 },
+    );
+    const [one, two] = [...screen.container.querySelectorAll("audio")];
+    await act(async () => {
+      vi.spyOn(one!, "paused", "get").mockReturnValue(false);
+      vi.spyOn(two!, "paused", "get").mockReturnValue(false);
+      one!.dispatchEvent(new Event("play"));
+      two!.dispatchEvent(new Event("play"));
+    });
+    await vi.waitFor(async () => {
+      await act(() => {
+        void props.listRef.current!.scrollToEnd({ animated: false });
+      });
+      const scroll = props.listRef.current!.getScrollableNode()!;
+      expect(scroll.scrollTop).toBeGreaterThan(5000);
+    });
+    expect(one!.isConnected).toBe(true);
+    expect(two!.isConnected).toBe(true);
+    await act(async () => {
+      vi.spyOn(one!, "paused", "get").mockReturnValue(true);
+      one!.dispatchEvent(new Event("pause"));
+    });
+    expect(two!.isConnected).toBe(true);
+    await act(async () => {
+      if (event === "pause") vi.spyOn(two!, "paused", "get").mockReturnValue(true);
+      two!.dispatchEvent(new Event(event));
+    });
+    await act(() => {
+      void props.listRef.current!.scrollToIndex({ index: 20, animated: false });
+    });
+    await vi.waitFor(() => expect(one!.isConnected).toBe(false));
+  });
+});
+
 describe("compact reasoning math", () => {
   it("keeps formulas while flattening compact reasoning previews", () => {
     const tree = parseMarkdownWithMath("## Reasoning\n\nUse **norm** $|x|$ and \\[x^2\\]");
@@ -327,4 +544,79 @@ describe("compact reasoning math", () => {
       "x^2",
     ]);
   });
+});
+
+it("renders automatic compaction as one live divider that finishes with its reason and token delta", async () => {
+  setup();
+  const fixture = makeStreamingTimelineFixture();
+  const prompt = fixture.visibleTurnItems[3]!;
+  const assistant = fixture.visibleTurnItems[5]!;
+  if (prompt.item.type !== "user_message" || assistant.item.type !== "assistant_message") {
+    throw new Error("Expected streaming fixture messages");
+  }
+  const promptItem = prompt.item;
+  const compaction = {
+    ...assistant,
+    item: {
+      ...assistant.item,
+      type: "compaction" as const,
+      driver: null,
+      beforeTokenCount: 899_000,
+    },
+  };
+  const entries = (completed: boolean) =>
+    deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          ...prompt,
+          item: { ...promptItem, text: "/compact", idleCompaction: "beforeCacheExpires" },
+        },
+        {
+          ...compaction,
+          item: {
+            ...compaction.item,
+            status: completed ? "completed" : "running",
+            afterTokenCount: completed ? 19_000 : undefined,
+          },
+        },
+      ],
+      optimisticMessages: [],
+    });
+  const props = baseProps();
+  const ui = (completed: boolean) => (
+    <MessagesTimeline
+      {...props}
+      timelineEntries={entries(completed)}
+      isWorking={!completed}
+      isCompacting={!completed}
+      activeTurnInProgress={!completed}
+      activeTurnStartedAt={fixture.time(5)}
+      latestRun={{
+        runId: fixture.runId,
+        status: completed ? "completed" : "running",
+        startedAt: fixture.time(5),
+        completedAt: completed ? fixture.time(9) : null,
+      }}
+    />
+  );
+  const container = document.createElement("div");
+  container.style.cssText = "height: 1200px; width: 900px; display: flex; flex-direction: column;";
+  await using screen = await render(ui(false), { container });
+  await expect
+    .element(screen.getByRole("separator", { name: "Compacting before the cache expires…" }))
+    .toBeVisible();
+  expect(container.textContent).not.toContain("/compact");
+  expect(container.textContent).not.toContain("Thinking");
+  expect(container.textContent).not.toContain("Working");
+  expect(container.querySelectorAll('[role="separator"]')).toHaveLength(1);
+  await screen.rerender(ui(true));
+  await expect
+    .element(
+      screen.getByRole("separator", {
+        name: "Context automatically compacted before cache expiry 899K → 19K tokens",
+      }),
+    )
+    .toBeVisible();
+  expect(container.querySelectorAll('[role="separator"]')).toHaveLength(1);
+  expect(container.textContent).not.toContain("Compacting before");
 });
