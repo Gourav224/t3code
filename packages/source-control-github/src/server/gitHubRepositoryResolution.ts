@@ -152,7 +152,9 @@ export function gitHubApiHostForRemote(remoteUrl: string): string | null {
   if (isSshRemoteUrl(remoteUrl) && !host.includes(".")) {
     return host.includes("github") ? "github.com" : null;
   }
-  return definition.recognizeRemote(remote) === null ? null : host;
+  if (definition.recognizeRemote(remote) === null) return null;
+  // GitHub's SSH-over-443 host has no API; gh reads that remote through github.com.
+  return host === "ssh.github.com" ? "github.com" : host;
 }
 
 function apiHostForHint(host: string): string {
