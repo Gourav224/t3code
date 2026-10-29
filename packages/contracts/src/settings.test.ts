@@ -115,6 +115,55 @@ describe("ServerSettings usage price overrides", () => {
   });
 });
 
+describe("ServerSettings secret providers", () => {
+  const onePassword = (account: string) => ({
+    kind: "one_password",
+    label: "Personal",
+    config: { account },
+  });
+
+  it("keeps an unknown kind or a longer label from invalidating the rest of the settings", () => {
+    const openbao = { kind: "openbao", label: "V".repeat(65), config: { address: "https://x" } };
+    const decoded = decodeServerSettings({
+      worktreesDirectory: "/work",
+      secretProviders: { vault: openbao, personal: onePassword("my.1password.com") },
+    });
+    expect(decoded.worktreesDirectory).toBe("/work");
+    expect(encodeServerSettings(decoded).secretProviders).toEqual({
+      vault: openbao,
+      personal: onePassword("my.1password.com"),
+    });
+  });
+
+  it("accepts slug ids and null removals but no id that is not a slug", () => {
+    expect(
+      decodeServerSettingsPatch({
+        secretProviders: { "1password": onePassword("my.1password.com"), work: null },
+      }).secretProviders,
+    ).toEqual({ "1password": onePassword("my.1password.com"), work: null });
+    for (const id of ["", "My Vault", "a/b", "-vault"]) {
+      expect(() =>
+        decodeServerSettingsPatch({ secretProviders: { [id]: onePassword("my.1password.com") } }),
+      ).toThrow();
+    }
+    expect(() =>
+      decodeServerSettingsPatch({
+        secretProviders: { work: { ...onePassword("my.1password.com"), label: "V".repeat(65) } },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects writes of an unknown kind or an account op could misread", () => {
+    const write = (entry: unknown) => () =>
+      decodeServerSettingsPatch({ secretProviders: { personal: entry } });
+    for (const account of ["", "my account", "--help"]) {
+      expect(write(onePassword(account))).toThrow();
+    }
+    expect(write({ kind: "one_password", label: "Personal" })).toThrow();
+    expect(write({ kind: "openbao", label: "Vault", config: { address: "https://x" } })).toThrow();
+  });
+});
+
 describe("custom model settings", () => {
   const capabilities = {
     optionDescriptors: [
