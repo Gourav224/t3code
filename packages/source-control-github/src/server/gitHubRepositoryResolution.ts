@@ -30,7 +30,8 @@ export function selectGitHubBaseRepository(input: {
   const repositories = new Map<string, { readonly owner: string; readonly name: string }>();
   for (const remote of parseFetchRemotes(input.remotes)) {
     const [remoteHost, owner, name, ...rest] = normalizeGitRemoteUrl(remote.url).split("/");
-    if (remoteHost !== host || !owner || !name || rest.length > 0) return null;
+    const apiHost = remoteHost === "ssh.github.com" ? "github.com" : remoteHost;
+    if (apiHost !== host || !owner || !name || rest.length > 0) return null;
     repositories.set(remote.name, { owner, name });
   }
   const marks = input.resolved
@@ -159,5 +160,8 @@ export function gitHubApiHostForRemote(remoteUrl: string): string | null {
 
 function apiHostForHint(host: string): string {
   const normalized = host.toLowerCase();
-  return !normalized.includes(".") && normalized.includes("github") ? "github.com" : normalized;
+  return normalized === "ssh.github.com" ||
+    (!normalized.includes(".") && normalized.includes("github"))
+    ? "github.com"
+    : normalized;
 }
